@@ -32,8 +32,16 @@ jobs:
         id: get-python
         run: |
           if [ -f runtime.txt ]; then
-            PY_VER=$(cat runtime.txt | tr -d '\n' | tr -d '\r' | tr -d ' ')
-            echo "python-version=$PY_VER" >> $GITHUB_OUTPUT
+            RAW=$(cat runtime.txt | tr -d '\r' | tr -d ' ')
+            # remove optional 'python-' prefix
+            RAW=${RAW#python-}
+            # extract major.minor (e.g. 3.10) to match actions/setup-python
+            if echo "$RAW" | grep -Eo '^[0-9]+\.[0-9]+' >/dev/null; then
+              MAJOR_MINOR=$(echo "$RAW" | grep -Eo '^[0-9]+\.[0-9]+')
+              echo "python-version=$MAJOR_MINOR" >> $GITHUB_OUTPUT
+            else
+              echo "python-version=3.10" >> $GITHUB_OUTPUT
+            fi
           else
             echo "python-version=3.10" >> $GITHUB_OUTPUT
           fi
