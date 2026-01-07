@@ -40,7 +40,6 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          cd OdinRobot
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
@@ -58,7 +57,7 @@ jobs:
           psql -h localhost -U postgres -c "CREATE DATABASE telebot;" || true
 
       - name: Verify config.ini exists
-        working-directory: ./OdinRobot
+        working-directory: ./
         run: |
           if [ ! -f config.ini ]; then
             echo "ERROR: config.ini not found!"
@@ -67,7 +66,7 @@ jobs:
           echo "✓ config.ini found and ready to use"
 
       - name: Run bot 24 hours with auto-restart
-        working-directory: ./OdinRobot
+        working-directory: ./
         timeout-minutes: 1440
         run: |
           #!/bin/bash
@@ -107,5 +106,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bot-logs
-          path: OdinRobot/logs.txt
+          path: logs.txt
           retention-days: 7
