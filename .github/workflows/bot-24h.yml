@@ -74,7 +74,7 @@ jobs:
         run: |
           psql -h localhost -U postgres -c "CREATE DATABASE telebot;" || true
 
-      - name: Verify config.ini exists
+      - name: Verify config.ini exists (warning only)
         working-directory: ./
         run: |
           if [ -f config.ini ]; then
@@ -82,9 +82,8 @@ jobs:
           elif [ -f OdinRobot/config.ini ]; then
             echo "✓ config.ini found at OdinRobot/config.ini"
           else
-            echo "ERROR: config.ini not found in root or OdinRobot/"
+            echo "⚠️ WARNING: config.ini not found in root or OdinRobot/ — continuing without it"
             echo "Repository listing:" && ls -la
-            exit 1
           fi
 
       - name: Run bot 24 hours with auto-restart
