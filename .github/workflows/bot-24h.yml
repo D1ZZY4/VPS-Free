@@ -28,10 +28,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      - name: Read Python runtime
+        id: get-python
+        run: |
+          if [ -f runtime.txt ]; then
+            PY_VER=$(cat runtime.txt | tr -d '\n' | tr -d '\r' | tr -d ' ')
+            echo "python-version=$PY_VER" >> $GITHUB_OUTPUT
+          else
+            echo "python-version=3.10" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: ${{ steps.get-python.outputs.python-version }}
 
       - name: Install system dependencies
         run: |
@@ -59,11 +69,15 @@ jobs:
       - name: Verify config.ini exists
         working-directory: ./
         run: |
-          if [ ! -f config.ini ]; then
-            echo "ERROR: config.ini not found!"
+          if [ -f config.ini ]; then
+            echo "✓ config.ini found at repository root"
+          elif [ -f OdinRobot/config.ini ]; then
+            echo "✓ config.ini found at OdinRobot/config.ini"
+          else
+            echo "ERROR: config.ini not found in root or OdinRobot/"
+            echo "Repository listing:" && ls -la
             exit 1
           fi
-          echo "✓ config.ini found and ready to use"
 
       - name: Run bot 24 hours with auto-restart
         working-directory: ./
