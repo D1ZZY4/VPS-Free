@@ -17,7 +17,6 @@ kigyo.session-journal
 *.png
 env/
 *.session-journal
-config.ini
 *.session-journal
 *.log
 shell_output.txt
