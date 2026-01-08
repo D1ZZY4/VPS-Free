@@ -2,13 +2,13 @@ name: Bot 24 Hours With Auto Backup
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 */2 * * *'  # setiap 2 jam
   workflow_dispatch:
 
 jobs:
   bot-runner:
     runs-on: ubuntu-latest
-    timeout-minutes: 1440
+    timeout-minutes: 180  # maksimal 3 jam per run
 
     services:
       postgres:
@@ -35,8 +35,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc python3-dev postgresql-client curl jq
+          sudo apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout="10"
+          sudo apt-get install -y --no-install-recommends gcc python3-dev postgresql-client curl jq
 
       - name: Install Python dependencies
         run: |
@@ -45,9 +45,17 @@ jobs:
 
       - name: Wait for PostgreSQL
         run: |
-          until pg_isready -h localhost -p 5432 -U postgres; do
+          MAX_TRIES=20
+          TRIES=0
+          until pg_isready -h localhost -p 5432 -U postgres || [ $TRIES -ge $MAX_TRIES ]; do
             sleep 3
+            TRIES=$((TRIES+1))
           done
+
+          if [ $TRIES -ge $MAX_TRIES ]; then
+            echo "❌ PostgreSQL failed to start"
+            exit 1
+          fi
 
       - name: Create database if not exists
         env:
@@ -63,14 +71,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           PGPASSWORD: admin@123
         run: |
-          set +e
           API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/autosave"
-
           RESPONSE=$(curl -s -H "Authorization: token $GH_TOKEN" $API_URL)
+
           ASSET_URL_DB=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name=="db.sql") | .url')
           ASSET_URL_CFG=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name=="config.ini") | .url')
 
-          if [ "$ASSET_URL_DB" != "null" ]; then
+          if [ "$ASSET_URL_DB" != "null" ] && [ -n "$ASSET_URL_DB" ]; then
             echo "⬇️ Restoring db.sql from release"
             curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_DB" -o db.sql
             psql -h localhost -U postgres telebot < db.sql
@@ -78,15 +85,15 @@ jobs:
             echo "ℹ️ No db.sql found, starting fresh"
           fi
 
-          if [ "$ASSET_URL_CFG" != "null" ]; then
+          if [ "$ASSET_URL_CFG" != "null" ] && [ -n "$ASSET_URL_CFG" ]; then
             echo "⬇️ Restoring config.ini from release"
             curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_CFG" -o config.ini
           fi
 
       # =========================
-      # MAIN LOOP
+      # RUN BOT ONCE + BACKUP
       # =========================
-      - name: Run bot with 2.5h backup cycle
+      - name: Run bot for 2.5 hours
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
@@ -95,57 +102,59 @@ jobs:
         run: |
           #!/bin/bash
           set -e
-
           INTERVAL=9000  # 2.5 jam
+
+          echo "▶ Starting bot"
+          python -m tg_bot &
+          BOT_PID=$!
+
+          echo "⏳ Bot running for 2.5 hours"
+          sleep $INTERVAL
+
+          echo "⛔ Stopping bot"
+          kill $BOT_PID
+          wait $BOT_PID 2>/dev/null || true
+
+          TS=$(date +"%Y%m%d_%H%M%S")
+
+          echo "🗄️ Dump database"
+          pg_dump -h localhost -U postgres telebot > db.sql
+
+          echo "📤 Upload db.sql & config.ini to GitHub Release"
           RELEASE_TAG="autosave"
+          RELEASE_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/$RELEASE_TAG)
+          RELEASE_ID=$(echo "$RELEASE_JSON" | jq -r '.id')
 
-          while true; do
-            echo "▶ Starting bot"
-            python -m tg_bot &
-            BOT_PID=$!
+          if [ "$RELEASE_ID" = "null" ]; then
+            RELEASE_ID=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"tag_name\":\"$RELEASE_TAG\",\"name\":\"Auto Backup\",\"body\":\"Bot autosave\"}" \
+              https://api.github.com/repos/${GITHUB_REPOSITORY}/releases | jq -r '.id')
+          fi
 
-            echo "⏳ Bot running for 2.5 hours"
-            sleep $INTERVAL
-
-            echo "⛔ Stopping bot"
-            kill $BOT_PID
-            wait $BOT_PID 2>/dev/null || true
-
-            TS=$(date +"%Y%m%d_%H%M%S")
-
-            echo "🗄️ Dump database"
-            pg_dump -h localhost -U postgres telebot > db.sql
-
-            echo "📤 Upload db.sql & config.ini to GitHub Release"
-
-            RELEASE_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
-              https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/$RELEASE_TAG)
-
-            RELEASE_ID=$(echo "$RELEASE_JSON" | jq -r '.id')
-
-            if [ "$RELEASE_ID" = "null" ]; then
-              RELEASE_ID=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"tag_name\":\"$RELEASE_TAG\",\"name\":\"Auto Backup\",\"body\":\"Bot autosave\"}" \
-                https://api.github.com/repos/${GITHUB_REPOSITORY}/releases | jq -r '.id')
-            fi
-
-            for FILE in db.sql config.ini; do
-              if [ -f "$FILE" ]; then
-                curl -s -X POST -H "Authorization: token $GH_TOKEN" \
-                  -H "Content-Type: application/octet-stream" \
-                  --data-binary @"$FILE" \
-                  "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$FILE" || true
+          for FILE in db.sql config.ini; do
+            if [ -f "$FILE" ]; then
+              ASSET_EXIST=$(curl -s -H "Authorization: token $GH_TOKEN" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" | jq -r ".[] | select(.name==\"$FILE\") | .id")
+              if [ -n "$ASSET_EXIST" ]; then
+                curl -s -X DELETE -H "Authorization: token $GH_TOKEN" \
+                  "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/$ASSET_EXIST"
               fi
-            done
 
-            echo "📦 Send logs to owner"
-            tar -czf logs_$TS.tar.gz logs.txt *.log 2>/dev/null || true
-
-            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
-              -F chat_id="${OWNER_ID}" \
-              -F document=@logs_$TS.tar.gz \
-              -F caption="🧾 Logs\n⏱ $TS"
-
-            rm -f logs_$TS.tar.gz
+              curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary @"$FILE" \
+                "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$FILE"
+            fi
           done
+
+          echo "📦 Send logs to owner"
+          tar -czf logs_$TS.tar.gz logs.txt *.log 2>/dev/null || true
+
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+            -F chat_id="${OWNER_ID}" \
+            -F document=@logs_$TS.tar.gz \
+            -F caption="🧾 Logs\n⏱ $TS"
+
+          rm -f logs_$TS.tar.gz
