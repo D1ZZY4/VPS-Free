@@ -5,10 +5,17 @@ on:
     - cron: '0 */2 * * *'  # setiap 2 jam
   workflow_dispatch:
 
+# =========================
+# Pastikan cuma 1 run jalan di satu waktu
+# =========================
+concurrency:
+  group: bot-runner
+  cancel-in-progress: true
+
 jobs:
   bot-runner:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # maksimal 3 jam per run
+    timeout-minutes: 300  # maksimal 5 jam per run
 
     services:
       postgres:
@@ -76,31 +83,30 @@ jobs:
 
           if [ -z "$RESPONSE" ] || echo "$RESPONSE" | grep -q '"message": "Not Found"'; then
             echo "ℹ️ Release 'autosave' not found, starting fresh"
-            exit 0
-          fi
-
-          ASSET_URL_DB=$(echo "$RESPONSE" | jq -r '.assets[]? | select(.name=="db.sql") | .url // empty')
-          ASSET_URL_CFG=$(echo "$RESPONSE" | jq -r '.assets[]? | select(.name=="config.ini") | .url // empty')
-
-          if [ -n "$ASSET_URL_DB" ]; then
-            echo "⬇️ Restoring db.sql from release"
-            curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_DB" -o db.sql
-            psql -h localhost -U postgres telebot < db.sql
           else
-            echo "ℹ️ No db.sql found, starting fresh"
-          fi
+            ASSET_URL_DB=$(echo "$RESPONSE" | jq -r '.assets[]? | select(.name=="db.sql") | .url // empty')
+            ASSET_URL_CFG=$(echo "$RESPONSE" | jq -r '.assets[]? | select(.name=="config.ini") | .url // empty')
 
-          if [ -n "$ASSET_URL_CFG" ]; then
-            echo "⬇️ Restoring config.ini from release"
-            curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_CFG" -o config.ini
-          else
-            echo "ℹ️ No config.ini found, starting fresh"
+            if [ -n "$ASSET_URL_DB" ]; then
+              echo "⬇️ Restoring db.sql from release"
+              curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_DB" -o db.sql
+              psql -h localhost -U postgres telebot < db.sql
+            else
+              echo "ℹ️ No db.sql found, starting fresh"
+            fi
+
+            if [ -n "$ASSET_URL_CFG" ]; then
+              echo "⬇️ Restoring config.ini from release"
+              curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_CFG" -o config.ini
+            else
+              echo "ℹ️ No config.ini found, starting fresh"
+            fi
           fi
 
       # =========================
       # RUN BOT ONCE + BACKUP
       # =========================
-      - name: Run bot for 2.5 hours
+      - name: Run bot for 4.5 hours
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
@@ -109,13 +115,13 @@ jobs:
         run: |
           #!/bin/bash
           set -e
-          INTERVAL=9000  # 2.5 jam
+          INTERVAL=16200  # 4.5 jam = 16200 detik
 
           echo "▶ Starting bot"
           python -m tg_bot &
           BOT_PID=$!
 
-          echo "⏳ Bot running for 2.5 hours"
+          echo "⏳ Bot running for 4.5 hours"
           sleep $INTERVAL
 
           echo "⛔ Stopping bot"
