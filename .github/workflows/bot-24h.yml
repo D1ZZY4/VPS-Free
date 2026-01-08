@@ -74,10 +74,15 @@ jobs:
           API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/autosave"
           RESPONSE=$(curl -s -H "Authorization: token $GH_TOKEN" $API_URL)
 
-          ASSET_URL_DB=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name=="db.sql") | .url')
-          ASSET_URL_CFG=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name=="config.ini") | .url')
+          if [ -z "$RESPONSE" ] || echo "$RESPONSE" | grep -q '"message": "Not Found"'; then
+            echo "ℹ️ Release 'autosave' not found, starting fresh"
+            exit 0
+          fi
 
-          if [ "$ASSET_URL_DB" != "null" ] && [ -n "$ASSET_URL_DB" ]; then
+          ASSET_URL_DB=$(echo "$RESPONSE" | jq -r '.assets[]? | select(.name=="db.sql") | .url // empty')
+          ASSET_URL_CFG=$(echo "$RESPONSE" | jq -r '.assets[]? | select(.name=="config.ini") | .url // empty')
+
+          if [ -n "$ASSET_URL_DB" ]; then
             echo "⬇️ Restoring db.sql from release"
             curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_DB" -o db.sql
             psql -h localhost -U postgres telebot < db.sql
@@ -85,9 +90,11 @@ jobs:
             echo "ℹ️ No db.sql found, starting fresh"
           fi
 
-          if [ "$ASSET_URL_CFG" != "null" ] && [ -n "$ASSET_URL_CFG" ]; then
+          if [ -n "$ASSET_URL_CFG" ]; then
             echo "⬇️ Restoring config.ini from release"
             curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_CFG" -o config.ini
+          else
+            echo "ℹ️ No config.ini found, starting fresh"
           fi
 
       # =========================
