@@ -36,7 +36,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc python3-dev postgresql-client
+          sudo apt-get install -y gcc python3-dev postgresql-client curl jq
 
       - name: Install Python dependencies
         run: |
@@ -55,18 +55,49 @@ jobs:
         run: |
           psql -h localhost -U postgres -c "CREATE DATABASE telebot;" || true
 
+      # =========================
+      # RESTORE FROM RELEASE
+      # =========================
+      - name: Restore db.sql & config.ini from GitHub Release (if exists)
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PGPASSWORD: admin@123
+        run: |
+          set +e
+          API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/autosave"
+
+          RESPONSE=$(curl -s -H "Authorization: token $GH_TOKEN" $API_URL)
+          ASSET_URL_DB=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name=="db.sql") | .url')
+          ASSET_URL_CFG=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name=="config.ini") | .url')
+
+          if [ "$ASSET_URL_DB" != "null" ]; then
+            echo "⬇️ Restoring db.sql from release"
+            curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_DB" -o db.sql
+            psql -h localhost -U postgres telebot < db.sql
+          else
+            echo "ℹ️ No db.sql found, starting fresh"
+          fi
+
+          if [ "$ASSET_URL_CFG" != "null" ]; then
+            echo "⬇️ Restoring config.ini from release"
+            curl -L -H "Authorization: token $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL_CFG" -o config.ini
+          fi
+
+      # =========================
+      # MAIN LOOP
+      # =========================
       - name: Run bot with 2.5h backup cycle
         env:
-          PGPASSWORD: admin@123
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PGPASSWORD: admin@123
         run: |
           #!/bin/bash
           set -e
 
-          INTERVAL=9000   # 2.5 jam
-          BACKUP_DIR=backup
-          mkdir -p $BACKUP_DIR
+          INTERVAL=9000  # 2.5 jam
+          RELEASE_TAG="autosave"
 
           while true; do
             echo "▶ Starting bot"
@@ -82,35 +113,39 @@ jobs:
 
             TS=$(date +"%Y%m%d_%H%M%S")
 
-            echo "🗄️ Backup database"
-            pg_dump -h localhost -U postgres telebot > $BACKUP_DIR/db_$TS.sql
+            echo "🗄️ Dump database"
+            pg_dump -h localhost -U postgres telebot > db.sql
 
-            echo "📦 Collect logs"
-            mkdir -p bundle_$TS
-            cp logs.txt bundle_$TS/ 2>/dev/null || true
-            cp *.log bundle_$TS/ 2>/dev/null || true
-            cp $BACKUP_DIR/db_$TS.sql bundle_$TS/
+            echo "📤 Upload db.sql & config.ini to GitHub Release"
 
-            tar -czf backup_$TS.tar.gz bundle_$TS
+            RELEASE_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/$RELEASE_TAG)
 
-            echo "📤 Send backup to owner"
+            RELEASE_ID=$(echo "$RELEASE_JSON" | jq -r '.id')
+
+            if [ "$RELEASE_ID" = "null" ]; then
+              RELEASE_ID=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"tag_name\":\"$RELEASE_TAG\",\"name\":\"Auto Backup\",\"body\":\"Bot autosave\"}" \
+                https://api.github.com/repos/${GITHUB_REPOSITORY}/releases | jq -r '.id')
+            fi
+
+            for FILE in db.sql config.ini; do
+              if [ -f "$FILE" ]; then
+                curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+                  -H "Content-Type: application/octet-stream" \
+                  --data-binary @"$FILE" \
+                  "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$FILE" || true
+              fi
+            done
+
+            echo "📦 Send logs to owner"
+            tar -czf logs_$TS.tar.gz logs.txt *.log 2>/dev/null || true
+
             curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
               -F chat_id="${OWNER_ID}" \
-              -F document=@backup_$TS.tar.gz \
-              -F caption="📦 Backup + Logs\n⏱ $TS"
+              -F document=@logs_$TS.tar.gz \
+              -F caption="🧾 Logs\n⏱ $TS"
 
-            echo "♻️ Restore database"
-            psql -h localhost -U postgres telebot < $BACKUP_DIR/db_$TS.sql
-
-            rm -rf bundle_$TS backup_$TS.tar.gz
+            rm -f logs_$TS.tar.gz
           done
-
-      - name: Upload logs (failsafe)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bot-logs
-          path: |
-            logs.txt
-            *.log
-          retention-days: 7
