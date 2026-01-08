@@ -1,4 +1,4 @@
-name: Bot 24 Hours
+name: Bot 24 Hours With Auto Backup
 
 on:
   schedule:
@@ -28,33 +28,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read Python runtime
-        id: get-python
-        run: |
-          if [ -f runtime.txt ]; then
-            RAW=$(cat runtime.txt | tr -d '\r' | tr -d ' ')
-            # remove optional 'python-' prefix
-            RAW=${RAW#python-}
-            # extract major.minor (e.g. 3.10) to match actions/setup-python
-            if echo "$RAW" | grep -Eo '^[0-9]+\.[0-9]+' >/dev/null; then
-              MAJOR_MINOR=$(echo "$RAW" | grep -Eo '^[0-9]+\.[0-9]+')
-              echo "python-version=$MAJOR_MINOR" >> $GITHUB_OUTPUT
-            else
-              echo "python-version=3.10" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "python-version=3.10" >> $GITHUB_OUTPUT
-          fi
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ steps.get-python.outputs.python-version }}
+          python-version: "3.10"
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git gcc python3-dev postgresql-client
+          sudo apt-get install -y gcc python3-dev postgresql-client
 
       - name: Install Python dependencies
         run: |
@@ -64,68 +46,71 @@ jobs:
       - name: Wait for PostgreSQL
         run: |
           until pg_isready -h localhost -p 5432 -U postgres; do
-            echo 'Waiting for PostgreSQL...'
             sleep 3
           done
 
-      - name: Create database
+      - name: Create database if not exists
         env:
           PGPASSWORD: admin@123
         run: |
           psql -h localhost -U postgres -c "CREATE DATABASE telebot;" || true
 
-      - name: Verify config.ini exists (warning only)
-        working-directory: ./
-        run: |
-          if [ -f config.ini ]; then
-            echo "✓ config.ini found at repository root"
-          elif [ -f OdinRobot/config.ini ]; then
-            echo "✓ config.ini found at OdinRobot/config.ini"
-          else
-            echo "⚠️ WARNING: config.ini not found in root or OdinRobot/ — continuing without it"
-            echo "Repository listing:" && ls -la
-          fi
-
-      - name: Run bot 24 hours with auto-restart
-        working-directory: ./
-        timeout-minutes: 1440
+      - name: Run bot with 2.5h backup cycle
+        env:
+          PGPASSWORD: admin@123
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
         run: |
           #!/bin/bash
-          
-          RESTART_COUNT=0
-          MAX_RETRIES=5
-          RETRY_DELAY=30
-          
+          set -e
+
+          INTERVAL=9000   # 2.5 jam
+          BACKUP_DIR=backup
+          mkdir -p $BACKUP_DIR
+
           while true; do
-            echo "▶ Starting bot... (Attempt $((RESTART_COUNT + 1)))"
-            
+            echo "▶ Starting bot"
             python -m tg_bot &
             BOT_PID=$!
-            
-            echo "✓ Bot started with PID: $BOT_PID"
-            RESTART_COUNT=0
-            
-            if wait $BOT_PID; then
-              echo "✓ Bot exited normally"
-            else
-              EXIT_CODE=$?
-              echo "✗ Bot crashed with exit code: $EXIT_CODE"
-              RESTART_COUNT=$((RESTART_COUNT + 1))
-              
-              if [ $RESTART_COUNT -ge $MAX_RETRIES ]; then
-                echo "✗ Max retries reached"
-                exit 1
-              fi
-              
-              echo "⏳ Waiting ${RETRY_DELAY}s before restart..."
-              sleep $RETRY_DELAY
-            fi
+
+            echo "⏳ Bot running for 2.5 hours"
+            sleep $INTERVAL
+
+            echo "⛔ Stopping bot"
+            kill $BOT_PID
+            wait $BOT_PID 2>/dev/null || true
+
+            TS=$(date +"%Y%m%d_%H%M%S")
+
+            echo "🗄️ Backup database"
+            pg_dump -h localhost -U postgres telebot > $BACKUP_DIR/db_$TS.sql
+
+            echo "📦 Collect logs"
+            mkdir -p bundle_$TS
+            cp logs.txt bundle_$TS/ 2>/dev/null || true
+            cp *.log bundle_$TS/ 2>/dev/null || true
+            cp $BACKUP_DIR/db_$TS.sql bundle_$TS/
+
+            tar -czf backup_$TS.tar.gz bundle_$TS
+
+            echo "📤 Send backup to owner"
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+              -F chat_id="${OWNER_ID}" \
+              -F document=@backup_$TS.tar.gz \
+              -F caption="📦 Backup + Logs\n⏱ $TS"
+
+            echo "♻️ Restore database"
+            psql -h localhost -U postgres telebot < $BACKUP_DIR/db_$TS.sql
+
+            rm -rf bundle_$TS backup_$TS.tar.gz
           done
 
-      - name: Upload logs
+      - name: Upload logs (failsafe)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bot-logs
-          path: logs.txt
+          path: |
+            logs.txt
+            *.log
           retention-days: 7
